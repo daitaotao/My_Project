@@ -1,0 +1,64 @@
+package com.example
+
+import org.apache.hadoop.hive.ql.exec.{UDAF, UDAFEvaluator}
+import org.apache.hadoop.io.Text
+
+class DifferentColumnsUDAF extends UDAF {
+  class DifferentColumnsUDAFEvaluator extends UDAFEvaluator {
+    private var result: Text = _
+
+    def init(): Unit = {
+      result = null
+    }
+
+    def iterate(col1: String, col2: String, col3: String, otherCols: String*): Boolean = {
+      if (result == null) {
+        result = new Text()
+      }
+      
+      val allCols = col1 :: col2 :: col3 :: otherCols.toList
+      val diffCols = allCols.zipWithIndex.filter { case (value, idx) =>
+        allCols.exists(_ != value)
+      }.map { case (_, idx) =>
+        s"col${idx + 1}"
+      }
+
+      if (diffCols.nonEmpty) {
+        if (result.getLength == 0) {
+          result.set(diffCols.mkString(","))
+        } else {
+          val existingCols = result.toString.split(",")
+          result.set((existingCols intersect diffCols).mkString(","))
+        }
+      }
+
+      true
+    }
+
+    def terminatePartial(): Text = {
+      result
+    }
+
+    def merge(other: Text): Boolean = {
+      if (result == null) {
+        result = new Text()
+      }
+      
+      if (other != null && other.getLength > 0) {
+        if (result.getLength == 0) {
+          result.set(other.toString)
+        } else {
+          val existingCols = result.toString.split(",")
+          val otherCols = other.toString.split(",")
+          result.set((existingCols intersect otherCols).mkString(","))
+        }
+      }
+      
+      true
+    }
+
+    def terminate(): Text = {
+      result
+    }
+  }
+}
