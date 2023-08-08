@@ -1,34 +1,34 @@
 package com.example
 
-import org.apache.hadoop.hive.ql.exec.{UDAF, UDAFEvaluator}
+import org.apache.hadoop.hive.ql.exec.UDAF
+import org.apache.hadoop.hive.ql.exec.UDAFEvaluator
 import org.apache.hadoop.io.Text
 
-class DifferentColumnsUDAF extends UDAF {
-  class DifferentColumnsUDAFEvaluator extends UDAFEvaluator {
-    private var result: Text = _
+class FindDifferentColumnsUDAF extends UDAF {
+  class FindDifferentColumnsUDAFEvaluator extends UDAFEvaluator {
+    private var key: Text = _
+    private var diffCols: Text = _
 
     def init(): Unit = {
-      result = null
+      key = null
+      diffCols = null
     }
 
-    def iterate(col1: String, col2: String, col3: String, otherCols: String*): Boolean = {
-      if (result == null) {
-        result = new Text()
-      }
-      
-      val allCols = col1 :: col2 :: col3 :: otherCols.toList
-      val diffCols = allCols.zipWithIndex.filter { case (value, idx) =>
-        allCols.exists(_ != value)
-      }.map { case (_, idx) =>
-        s"col${idx + 1}"
+    def iterate(count: Int, keyStr: String, cols: String*): Boolean = {
+      if (key == null) {
+        key = new Text(keyStr)
       }
 
-      if (diffCols.nonEmpty) {
-        if (result.getLength == 0) {
-          result.set(diffCols.mkString(","))
-        } else {
-          val existingCols = result.toString.split(",")
-          result.set((existingCols intersect diffCols).mkString(","))
+      if (keyStr == key.toString) {
+        val distinctCols = cols.distinct
+        if (distinctCols.size > 1) {
+          if (diffCols == null) {
+            diffCols = new Text(distinctCols.mkString(","))
+          } else {
+            val existingCols = diffCols.toString.split(",")
+            val newCols = distinctCols.filterNot(existingCols.contains)
+            diffCols.set((existingCols ++ newCols).mkString(","))
+          }
         }
       }
 
@@ -36,29 +36,24 @@ class DifferentColumnsUDAF extends UDAF {
     }
 
     def terminatePartial(): Text = {
-      result
+      diffCols
     }
 
     def merge(other: Text): Boolean = {
-      if (result == null) {
-        result = new Text()
-      }
-      
       if (other != null && other.getLength > 0) {
-        if (result.getLength == 0) {
-          result.set(other.toString)
+        if (diffCols == null) {
+          diffCols = new Text(other)
         } else {
-          val existingCols = result.toString.split(",")
+          val existingCols = diffCols.toString.split(",")
           val otherCols = other.toString.split(",")
-          result.set((existingCols intersect otherCols).mkString(","))
+          diffCols.set((existingCols intersect otherCols).mkString(","))
         }
       }
-      
       true
     }
 
     def terminate(): Text = {
-      result
+      diffCols
     }
   }
 }
