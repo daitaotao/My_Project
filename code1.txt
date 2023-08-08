@@ -1,59 +1,81 @@
-package com.example
+import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.expressions.{MutableAggregationBuffer, UserDefinedAggregateFunction}
+import org.apache.spark.sql.types._
 
-import org.apache.hadoop.hive.ql.exec.UDAF
-import org.apache.hadoop.hive.ql.exec.UDAFEvaluator
-import org.apache.hadoop.io.Text
+object FindDifferentColumnsUDAF extends UserDefinedAggregateFunction {
 
-class FindDifferentColumnsUDAF extends UDAF {
-  class FindDifferentColumnsUDAFEvaluator extends UDAFEvaluator {
-    private var key: Text = _
-    private var diffCols: Text = _
+  // Define input schema for the UDAF
+  override def inputSchema: StructType = StructType(
+    StructField("key", StringType) ::
+    StructField("cols", ArrayType(StringType)) ::
+    Nil
+  )
 
-    def init(): Unit = {
-      key = null
-      diffCols = null
-    }
+  // Define buffer schema for intermediate computations
+  override def bufferSchema: StructType = StructType(
+    StructField("diffCols", StringType) ::
+    Nil
+  )
 
-    def iterate(count: Int, keyStr: String, cols: String*): Boolean = {
-      if (key == null) {
-        key = new Text(keyStr)
-      }
+  // Define output schema of the UDAF
+  override def dataType: DataType = StringType
 
-      if (keyStr == key.toString) {
-        val distinctCols = cols.distinct
-        if (distinctCols.size > 1) {
-          if (diffCols == null) {
-            diffCols = new Text(distinctCols.mkString(","))
-          } else {
-            val existingCols = diffCols.toString.split(",")
-            val newCols = distinctCols.filterNot(existingCols.contains)
-            diffCols.set((existingCols ++ newCols).mkString(","))
-          }
-        }
-      }
+  // Define whether the UDAF is deterministic or not
+  override def deterministic: Boolean = true
 
-      true
-    }
+  // Initialize the buffer
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    buffer.update(0, "")
+  }
 
-    def terminatePartial(): Text = {
-      diffCols
-    }
+  // Update the buffer with new input
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    val key = input.getString(0)
+    val cols = input.getSeq[String](1)
 
-    def merge(other: Text): Boolean = {
-      if (other != null && other.getLength > 0) {
-        if (diffCols == null) {
-          diffCols = new Text(other)
-        } else {
-          val existingCols = diffCols.toString.split(",")
-          val otherCols = other.toString.split(",")
-          diffCols.set((existingCols intersect otherCols).mkString(","))
-        }
-      }
-      true
-    }
-
-    def terminate(): Text = {
-      diffCols
+    val distinctCols = cols.distinct
+    if (distinctCols.size > 1) {
+      val currentDiffCols = buffer.getString(0)
+      val newDiffCols = (distinctCols diff currentDiffCols.split(",")).mkString(",")
+      buffer.update(0, newDiffCols)
     }
   }
+
+  // Merge intermediate buffers
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    val currentDiffCols = buffer1.getString(0)
+    val newDiffCols = buffer2.getString(0)
+    val mergedDiffCols = (currentDiffCols.split(",") ++ newDiffCols.split(",")).distinct.mkString(",")
+    buffer1.update(0, mergedDiffCols)
+  }
+
+  // Evaluate the result
+  override def evaluate(buffer: Row): Any = {
+    buffer.getString(0)
+  }
+}
+
+object Main extends App {
+  val spark = SparkSession.builder()
+    .appName("FindDifferentColumnsUDAFExample")
+    .config("spark.master", "local")
+    .getOrCreate()
+
+  spark.udf.register("find_different_columns", FindDifferentColumnsUDAF)
+
+  val df = spark.read.option("header", "true").csv("/path/to/your/data/file.csv")
+
+  df.createOrReplaceTempView("your_table")
+
+  val result = spark.sql("""
+    SELECT
+      key,
+      find_different_columns(key, array(col1, col2, col3, ...)) AS diff_cols
+    FROM your_table
+    GROUP BY key
+  """)
+
+  result.show()
+
+  spark.stop()
 }
