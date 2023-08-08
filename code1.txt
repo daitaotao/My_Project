@@ -1,6 +1,6 @@
-import org.apache.spark.sql.{Row, SparkSession}
-import org.apache.spark.sql.expressions.{MutableAggregationBuffer, UserDefinedAggregateFunction}
+import org.apache.spark.sql.expressions.{UserDefinedAggregateFunction, MutableAggregationBuffer}
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.{Row, SparkSession}
 
 object FindDifferentColumnsUDAF extends UserDefinedAggregateFunction {
 
@@ -13,19 +13,27 @@ object FindDifferentColumnsUDAF extends UserDefinedAggregateFunction {
 
   // Define buffer schema for intermediate computations
   override def bufferSchema: StructType = StructType(
-    StructField("diffCols", StringType) ::
+    StructField("count", LongType) ::
+    StructField("commonCols", ArrayType(StringType)) ::
+    StructField("diffCols", ArrayType(StringType)) ::
     Nil
   )
 
   // Define output schema of the UDAF
-  override def dataType: DataType = StringType
+  override def dataType: DataType = StructType(
+    StructField("key", StringType) ::
+    StructField("diff_cols", ArrayType(StringType)) ::
+    Nil
+  )
 
   // Define whether the UDAF is deterministic or not
   override def deterministic: Boolean = true
 
   // Initialize the buffer
   override def initialize(buffer: MutableAggregationBuffer): Unit = {
-    buffer.update(0, "")
+    buffer(0) = 0L
+    buffer(1) = Array[String]()
+    buffer(2) = Array[String]()
   }
 
   // Update the buffer with new input
@@ -33,25 +41,43 @@ object FindDifferentColumnsUDAF extends UserDefinedAggregateFunction {
     val key = input.getString(0)
     val cols = input.getSeq[String](1)
 
-    val distinctCols = cols.distinct
-    if (distinctCols.size > 1) {
-      val currentDiffCols = buffer.getString(0)
-      val newDiffCols = (distinctCols diff currentDiffCols.split(",")).mkString(",")
-      buffer.update(0, newDiffCols)
+    val count = buffer.getLong(0) + 1
+    buffer(0) = count
+
+    if (count == 1) {
+      buffer(1) = cols.toArray
+    } else {
+      val commonCols = buffer.getSeq[String](1)
+      val newCommonCols = commonCols.filter(cols.contains)
+      buffer(1) = newCommonCols.toArray
+
+      val diffCols = buffer.getSeq[String](2)
+      val newDiffCols = cols.filterNot(commonCols.contains)
+      buffer(2) = diffCols.union(newDiffCols).distinct.toArray
     }
   }
 
   // Merge intermediate buffers
   override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
-    val currentDiffCols = buffer1.getString(0)
-    val newDiffCols = buffer2.getString(0)
-    val mergedDiffCols = (currentDiffCols.split(",") ++ newDiffCols.split(",")).distinct.mkString(",")
-    buffer1.update(0, mergedDiffCols)
+    val mergedCount = buffer1.getLong(0) + buffer2.getLong(0)
+    buffer1(0) = mergedCount
+
+    val commonCols1 = buffer1.getSeq[String](1)
+    val commonCols2 = buffer2.getSeq[String](1)
+    val mergedCommonCols = commonCols1.intersect(commonCols2)
+    buffer1(1) = mergedCommonCols.toArray
+
+    val diffCols1 = buffer1.getSeq[String](2)
+    val diffCols2 = buffer2.getSeq[String](2)
+    val mergedDiffCols = diffCols1.union(diffCols2).distinct
+    buffer1(2) = mergedDiffCols.toArray
   }
 
   // Evaluate the result
   override def evaluate(buffer: Row): Any = {
-    buffer.getString(0)
+    val key = buffer.getString(0)
+    val diffCols = buffer.getSeq[String](2)
+    Row(key, diffCols.toArray)
   }
 }
 
@@ -63,14 +89,24 @@ object Main extends App {
 
   spark.udf.register("find_different_columns", FindDifferentColumnsUDAF)
 
-  val df = spark.read.option("header", "true").csv("/path/to/your/data/file.csv")
+  val data = Seq(
+    (2, "a", 1, 2, 3),
+    (2, "a", 1, 2, 2),
+    (1, "b", 1, 2, 3),
+    (3, "c", 1, 2, 3),
+    (3, "c", 2, 2, 3),
+    (3, "c", 1, 2, 2)
+  )
+
+  val df = spark.createDataFrame(data)
+    .toDF("count", "key", "col1", "col2", "col3")
 
   df.createOrReplaceTempView("your_table")
 
   val result = spark.sql("""
     SELECT
       key,
-      find_different_columns(key, array(col1, col2, col3, ...)) AS diff_cols
+      find_different_columns(key, array(col1, col2, col3)) AS diff_cols
     FROM your_table
     GROUP BY key
   """)
